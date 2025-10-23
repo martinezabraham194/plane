@@ -1,0 +1,193 @@
+name: Deploy Plane to Cloud Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_web:
+        description: "Deploy the web frontend (apps/web)"
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      deploy_api:
+        description: "Deploy the API (apps/api)"
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      deploy_worker:
+        description: "Deploy the Celery worker (uses API image with worker entrypoint)"
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+  push:
+    branches: [ main ]
+
+# Required repo secrets (set in GitHub > Settings > Secrets and variables > Actions):
+# - GCP_SA_KEY:           JSON key for a service account with roles: Artifact Registry Writer, Cloud Run Admin, Service Account User
+# - GCP_PROJECT_ID:       Your GCP project id (e.g. my-project)
+# - GCP_REGION:           Cloud Run region (e.g. us-central1)
+# - GAR_LOCATION:         Artifact Registry location (e.g. us)
+# - GAR_REPOSITORY:       Artifact Registry repository name to push images to (e.g. plane)
+# - SUPABASE_DB_URL:      Postgres connection string from Supabase (starts with postgresql:// or postgres://)
+# - SUPABASE_S3_ENDPOINT_URL: Supabase S3-compatible endpoint URL (e.g. https://<project>.supabase.co/storage/v1/s3)
+# - SUPABASE_S3_ACCESS_KEY:   Supabase access key id for S3 API
+# - SUPABASE_S3_SECRET_KEY:   Supabase secret access key for S3 API
+# - SUPABASE_BUCKET:      Bucket name in Supabase Storage (create one, e.g. uploads)
+# Optional (recommended for production):
+# - SECRET_KEY:           Django secret key (stable between deploys)
+# - REDIS_URL:            Redis URL for cache/session (e.g. rediss://... Upstash free tier). Optional but recommended.
+# - AMQP_URL:             Celery broker URL (CloudAMQP free tier works). Optional; required if you deploy worker.
+
+jobs:
+  deploy:
+    name: Build and deploy to Cloud Run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      REGION: ${{ secrets.GCP_REGION }}
+      GAR_LOCATION: ${{ secrets.GAR_LOCATION }}
+      GAR_REPOSITORY: ${{ secrets.GAR_REPOSITORY }}
+      REGISTRY: ${{ secrets.GAR_LOCATION }}-docker.pkg.dev
+      SERVICE_API: plane-api
+      SERVICE_WEB: plane-web
+      SERVICE_WORKER: plane-worker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Google auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Configure Docker auth for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ env.REGISTRY }} -q
+
+      - name: Compute image tags
+        id: images
+        run: |
+          API_IMAGE=${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/${{ env.SERVICE_API }}:${{ github.sha }}
+          WEB_IMAGE=${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/${{ env.SERVICE_WEB }}:${{ github.sha }}
+          echo "api_image=$API_IMAGE" >> $GITHUB_OUTPUT
+          echo "web_image=$WEB_IMAGE" >> $GITHUB_OUTPUT
+
+      - name: Build API image
+        if: ${{ inputs.deploy_api == 'true' }}
+        run: |
+          docker build \
+            -f apps/api/Dockerfile.api \
+            -t ${{ steps.images.outputs.api_image }} \
+            apps/api
+
+      - name: Push API image
+        if: ${{ inputs.deploy_api == 'true' }}
+        run: docker push ${{ steps.images.outputs.api_image }}
+
+      - name: Run DB migrations using API image
+        if: ${{ inputs.deploy_api == 'true' }}
+        run: |
+          docker run --rm \
+            -e DATABASE_URL='${{ secrets.SUPABASE_DB_URL }}' \
+            -e SECRET_KEY='${{ secrets.SECRET_KEY }}' \
+            ${{ steps.images.outputs.api_image }} \
+            bash -lc "python manage.py migrate --noinput"
+
+      - name: Deploy Cloud Run service (API)
+        if: ${{ inputs.deploy_api == 'true' }}
+        run: |
+          gcloud run deploy ${{ env.SERVICE_API }} \
+            --project ${{ env.PROJECT_ID }} \
+            --region ${{ env.REGION }} \
+            --image ${{ steps.images.outputs.api_image }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --min-instances 0 \
+            --max-instances 1 \
+            --cpu 0.25 \
+            --memory 512Mi \
+            --set-env-vars DATABASE_URL='${{ secrets.SUPABASE_DB_URL }}' \
+            --set-env-vars AWS_S3_ENDPOINT_URL='${{ secrets.SUPABASE_S3_ENDPOINT_URL }}' \
+            --set-env-vars AWS_ACCESS_KEY_ID='${{ secrets.SUPABASE_S3_ACCESS_KEY }}' \
+            --set-env-vars AWS_SECRET_ACCESS_KEY='${{ secrets.SUPABASE_S3_SECRET_KEY }}' \
+            --set-env-vars AWS_S3_BUCKET_NAME='${{ secrets.SUPABASE_BUCKET }}' \
+            --set-env-vars USE_MINIO=0 \
+            --set-env-vars DEBUG=0 \
+            --set-env-vars GUNICORN_WORKERS=1 \
+            --set-env-vars SECRET_KEY='${{ secrets.SECRET_KEY }}' \
+            $( [ -n "${{ secrets.REDIS_URL }}" ] && echo --set-env-vars REDIS_URL='${{ secrets.REDIS_URL }}' ) \
+            $( [ -n "${{ secrets.AMQP_URL }}" ] && echo --set-env-vars AMQP_URL='${{ secrets.AMQP_URL }}' )
+
+      - name: Deploy Cloud Run service (Worker)
+        if: ${{ inputs.deploy_worker == 'true' }}
+        run: |
+          gcloud run deploy ${{ env.SERVICE_WORKER }} \
+            --project ${{ env.PROJECT_ID }} \
+            --region ${{ env.REGION }} \
+            --image ${{ steps.images.outputs.api_image }} \
+            --platform managed \
+            --no-allow-unauthenticated \
+            --min-instances 0 \
+            --max-instances 1 \
+            --cpu 0.25 \
+            --memory 512Mi \
+            --command /code/bin/docker-entrypoint-worker.sh \
+            --set-env-vars DATABASE_URL='${{ secrets.SUPABASE_DB_URL }}' \
+            $( [ -n "${{ secrets.REDIS_URL }}" ] && echo --set-env-vars REDIS_URL='${{ secrets.REDIS_URL }}' ) \
+            --set-env-vars SECRET_KEY='${{ secrets.SECRET_KEY }}' \
+            --set-env-vars DEBUG=0 \
+            --set-env-vars GUNICORN_WORKERS=1 \
+            --set-env-vars USE_MINIO=0 \
+            --set-env-vars AWS_S3_ENDPOINT_URL='${{ secrets.SUPABASE_S3_ENDPOINT_URL }}' \
+            --set-env-vars AWS_ACCESS_KEY_ID='${{ secrets.SUPABASE_S3_ACCESS_KEY }}' \
+            --set-env-vars AWS_SECRET_ACCESS_KEY='${{ secrets.SUPABASE_S3_SECRET_KEY }}' \
+            --set-env-vars AWS_S3_BUCKET_NAME='${{ secrets.SUPABASE_BUCKET }}' \
+            --set-env-vars AMQP_URL='${{ secrets.AMQP_URL }}'
+
+      - name: Get API URL
+        id: apiurl
+        if: ${{ inputs.deploy_api == 'true' || inputs.deploy_web == 'true' }}
+        run: |
+          API_URL=$(gcloud run services describe ${{ env.SERVICE_API }} --region ${{ env.REGION }} --format 'value(status.url)')
+          echo "url=$API_URL" >> $GITHUB_OUTPUT
+
+      - name: Build Web image (Next.js apps/web)
+        if: ${{ inputs.deploy_web == 'true' }}
+        run: |
+          docker build \
+            -f apps/web/Dockerfile.web \
+            --build-arg NEXT_PUBLIC_API_BASE_URL='${{ steps.apiurl.outputs.url }}' \
+            --build-arg NEXT_PUBLIC_API_BASE_PATH='/api' \
+            -t ${{ steps.images.outputs.web_image }} \
+            .
+
+      - name: Push Web image
+        if: ${{ inputs.deploy_web == 'true' }}
+        run: docker push ${{ steps.images.outputs.web_image }}
+
+      - name: Deploy Cloud Run service (Web)
+        if: ${{ inputs.deploy_web == 'true' }}
+        run: |
+          gcloud run deploy ${{ env.SERVICE_WEB }} \
+            --project ${{ env.PROJECT_ID }} \
+            --region ${{ env.REGION }} \
+            --image ${{ steps.images.outputs.web_image }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --min-instances 0 \
+            --max-instances 1 \
+            --cpu 0.25 \
+            --memory 512Mi
+
+      - name: Output service URLs
+        if: always()
+        run: |
+          echo "API: $(gcloud run services describe ${{ env.SERVICE_API }} --region ${{ env.REGION }} --format 'value(status.url)')"
+          echo "Web: $(gcloud run services describe ${{ env.SERVICE_WEB }} --region ${{ env.REGION }} --format 'value(status.url)' || true)"
