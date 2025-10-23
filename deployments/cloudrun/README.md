@@ -60,12 +60,25 @@ With the bucket in place, the API’s startup check will succeed.
 
 Benefits: near-zero idle cost, no GCP VPC connector needed, works directly from Cloud Run.
 
-## 4) (Optional) Celery broker via CloudAMQP
-1. Create a free instance at CloudAMQP.
-2. Copy the AMQP URL (amqps://...).
-3. Save it as GitHub secret AMQP_URL.
+## 4) Celery with CloudAMQP (recommended for worker)
 
-If you deploy the worker, AMQP_URL is required. Without it, the worker has no broker and won’t process tasks.
+Celery in this repo uses the broker URL from `AMQP_URL` (see `plane/settings/common.py`). CloudAMQP is the simplest low-cost broker that works over the public Internet from Cloud Run.
+
+Steps
+1. Create a free CloudAMQP instance (Tiny/Lemur plan is fine).
+2. In the instance dashboard, copy the AMQP connection URL – it should start with `amqps://` (TLS enabled).
+3. In GitHub → Secrets and variables → Actions, add:
+   - `AMQP_URL` = your CloudAMQP URL (example: `amqps://user:pass@host.rmq.cloudamqp.com/vhost`)
+4. (Optional but recommended) Keep `REDIS_URL` set (Upstash) for Django cache performance.
+5. When running the workflow, set `deploy_worker=true`. The worker Cloud Run service uses the API image with `/code/bin/docker-entrypoint-worker.sh` and will connect to the broker via `AMQP_URL`.
+
+Notes
+- No results backend is configured; most tasks here don’t require fetching results. If you need a result backend later, you can use Redis (set `CELERY_RESULT_BACKEND`), but it is not required for basic operation.
+- If you prefer RabbitMQ fully on GCP, you can use the managed RabbitMQ service, but it’s not the cheapest. CloudAMQP free tier is typically enough for tiny usage.
+
+Verify the worker
+1. After deployment, open Google Cloud Console → Cloud Run → `plane-worker` → Logs. You should see Celery start and show worker-ready logs.
+2. Trigger any action in the app that queues a task (e.g., events that send emails or process attachments). You should see task log lines appear in the worker service.
 
 ## 5) GCP prep checklist
 - Enable APIs: Cloud Run, Artifact Registry
@@ -79,7 +92,7 @@ If you deploy the worker, AMQP_URL is required. Without it, the worker has no br
    - Inputs:
      - deploy_api: true
      - deploy_web: true
-     - deploy_worker: false (or true if you added AMQP_URL and want background tasks)
+   - deploy_worker: false (or true if you added `AMQP_URL` and want background tasks)
 2. The workflow will:
    - Build/push API image
    - Run Django migrations against Supabase
