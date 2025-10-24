@@ -56,6 +56,7 @@ jobs:
       GAR_LOCATION: ${{ secrets.GAR_LOCATION || vars.GAR_LOCATION }}
       GAR_REPOSITORY: ${{ secrets.GAR_REPOSITORY || vars.GAR_REPOSITORY }}
       REGISTRY: ${{ (secrets.GAR_LOCATION || vars.GAR_LOCATION) }}-docker.pkg.dev
+      REDIS_URL: ${{ secrets.REDIS_URL || vars.REDIS_URL }}
       SERVICE_API: plane-api
       SERVICE_WEB: plane-web
       SERVICE_WORKER: plane-worker
@@ -154,6 +155,12 @@ jobs:
           docker run --rm \
             -e DATABASE_URL='${{ secrets.SUPABASE_DB_URL }}' \
             -e SECRET_KEY='${{ secrets.SECRET_KEY }}' \
+            -e AWS_S3_ENDPOINT_URL='${{ secrets.SUPABASE_S3_ENDPOINT_URL }}' \
+            -e AWS_ACCESS_KEY_ID='${{ secrets.SUPABASE_S3_ACCESS_KEY }}' \
+            -e AWS_SECRET_ACCESS_KEY='${{ secrets.SUPABASE_S3_SECRET_KEY }}' \
+            -e AWS_S3_BUCKET_NAME='${{ secrets.SUPABASE_BUCKET }}' \
+            -e USE_MINIO=0 \
+            $( [ -n "${{ secrets.REDIS_URL }}" ] && echo "-e REDIS_URL='${{ secrets.REDIS_URL }}'" ) \
             ${{ steps.images.outputs.api_image }} \
             bash -lc "python manage.py migrate --noinput"
 
@@ -246,5 +253,5 @@ jobs:
       - name: Output service URLs
         if: always()
         run: |
-          echo "API: $(gcloud run services describe ${{ env.SERVICE_API }} --region ${{ env.REGION }} --format 'value(status.url)')"
+          echo "API: $(gcloud run services describe ${{ env.SERVICE_API }} --region ${{ env.REGION }} --format 'value(status.url)' || true)"
           echo "Web: $(gcloud run services describe ${{ env.SERVICE_WEB }} --region ${{ env.REGION }} --format 'value(status.url)' || true)"
