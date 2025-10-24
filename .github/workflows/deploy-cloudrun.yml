@@ -45,17 +45,32 @@ jobs:
       contents: read
       id-token: write
     env:
-      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-      REGION: ${{ secrets.GCP_REGION }}
-      GAR_LOCATION: ${{ secrets.GAR_LOCATION }}
-      GAR_REPOSITORY: ${{ secrets.GAR_REPOSITORY }}
-      REGISTRY: ${{ secrets.GAR_LOCATION }}-docker.pkg.dev
+      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID || vars.GCP_PROJECT_ID }}
+      REGION: ${{ secrets.GCP_REGION || vars.GCP_REGION }}
+      GAR_LOCATION: ${{ secrets.GAR_LOCATION || vars.GAR_LOCATION }}
+      GAR_REPOSITORY: ${{ secrets.GAR_REPOSITORY || vars.GAR_REPOSITORY }}
+      REGISTRY: ${{ (secrets.GAR_LOCATION || vars.GAR_LOCATION) }}-docker.pkg.dev
       SERVICE_API: plane-api
       SERVICE_WEB: plane-web
       SERVICE_WORKER: plane-worker
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Validate required inputs
+        run: |
+          set -e
+          missing=()
+          [ -z "${{ secrets.GCP_SA_KEY }}" ] && missing+=("GCP_SA_KEY (secret)")
+          [ -z "${PROJECT_ID}" ] && missing+=("GCP_PROJECT_ID (secret or var)")
+          [ -z "${REGION}" ] && missing+=("GCP_REGION (secret or var)")
+          [ -z "${GAR_LOCATION}" ] && missing+=("GAR_LOCATION (secret or var)")
+          [ -z "${GAR_REPOSITORY}" ] && missing+=("GAR_REPOSITORY (secret or var)")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "Missing required configuration: ${missing[*]}" >&2
+            exit 1
+          fi
+          echo "Inputs OK: PROJECT_ID=${PROJECT_ID}, REGION=${REGION}, GAR_LOCATION=${GAR_LOCATION}, GAR_REPOSITORY=${GAR_REPOSITORY}"
 
       - name: Google auth
         uses: google-github-actions/auth@v2
