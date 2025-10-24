@@ -109,6 +109,21 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
+      - name: Ensure Artifact Registry repository exists
+        run: |
+          set -e
+          if gcloud artifacts repositories describe "${GAR_REPOSITORY}" --location "${GAR_LOCATION}" >/dev/null 2>&1; then
+            echo "Artifact Registry repo '${GAR_REPOSITORY}' exists in ${GAR_LOCATION}."
+          else
+            echo "Artifact Registry repo '${GAR_REPOSITORY}' not found in ${GAR_LOCATION}. Attempting to create (requires roles/artifactregistry.admin or project editor)."
+            if gcloud artifacts repositories create "${GAR_REPOSITORY}" --repository-format=docker --location "${GAR_LOCATION}" --description "Plane images"; then
+              echo "Created repo '${GAR_REPOSITORY}' in ${GAR_LOCATION}."
+            else
+              echo "Failed to create repo. Ensure the service account has 'Artifact Registry Admin' or create it manually via:\n  gcloud artifacts repositories create ${GAR_REPOSITORY} --repository-format=docker --location ${GAR_LOCATION}"
+              exit 1
+            fi
+          fi
+
       - name: Configure Docker auth for Artifact Registry
         run: |
           gcloud auth configure-docker ${{ env.REGISTRY }} -q
