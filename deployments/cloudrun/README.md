@@ -93,6 +93,7 @@ Verify the worker
      - deploy_api: true
      - deploy_web: true
    - deploy_worker: false (or true if you added `AMQP_URL` and want background tasks)
+   - environment_name: If you stored your values as Environment-level secrets/variables in GitHub (Settings → Environments), provide that environment name here so the workflow can read them. If you used repository-level secrets/variables, you can leave this blank.
 2. The workflow will:
    - Build/push API image
    - Run Django migrations against Supabase

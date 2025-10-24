@@ -18,6 +18,10 @@ on:
         default: "false"
         type: choice
         options: ["true", "false"]
+      environment_name:
+        description: "GitHub Environment name (required if you stored secrets/vars at environment scope)"
+        required: false
+        type: string
   push:
     branches: [ main ]
 
@@ -41,6 +45,8 @@ jobs:
   deploy:
     name: Build and deploy to Cloud Run
     runs-on: ubuntu-latest
+    # If you use Environment-scoped secrets/vars, set this when dispatching the workflow
+    environment: ${{ inputs.environment_name }}
     permissions:
       contents: read
       id-token: write
@@ -63,14 +69,35 @@ jobs:
           missing=()
           [ -z "${{ secrets.GCP_SA_KEY }}" ] && missing+=("GCP_SA_KEY (secret)")
           [ -z "${PROJECT_ID}" ] && missing+=("GCP_PROJECT_ID (secret or var)")
-          [ -z "${REGION}" ] && missing+=("GCP_REGION (secret or var)")
-          [ -z "${GAR_LOCATION}" ] && missing+=("GAR_LOCATION (secret or var)")
+          # Provide safe defaults for REGION and GAR_LOCATION if not set
+          if [ -z "${REGION}" ]; then
+            REGION="us-central1"
+            echo "Defaulting REGION=${REGION}"
+          fi
+          if [ -z "${GAR_LOCATION}" ]; then
+            GAR_LOCATION="us"
+            echo "Defaulting GAR_LOCATION=${GAR_LOCATION}"
+          fi
           [ -z "${GAR_REPOSITORY}" ] && missing+=("GAR_REPOSITORY (secret or var)")
           if [ ${#missing[@]} -gt 0 ]; then
             echo "Missing required configuration: ${missing[*]}" >&2
             exit 1
           fi
-          echo "Inputs OK: PROJECT_ID=${PROJECT_ID}, REGION=${REGION}, GAR_LOCATION=${GAR_LOCATION}, GAR_REPOSITORY=${GAR_REPOSITORY}"
+          # Export normalized values to subsequent steps
+          echo "PROJECT_ID=${PROJECT_ID}" >> $GITHUB_ENV
+          echo "REGION=${REGION}" >> $GITHUB_ENV
+          echo "GAR_LOCATION=${GAR_LOCATION}" >> $GITHUB_ENV
+          echo "GAR_REPOSITORY=${GAR_REPOSITORY}" >> $GITHUB_ENV
+          echo "REGISTRY=${GAR_LOCATION}-docker.pkg.dev" >> $GITHUB_ENV
+          echo "Inputs OK: PROJECT_ID=${PROJECT_ID}, REGION=${REGION}, GAR_LOCATION=${GAR_LOCATION}, GAR_REPOSITORY=${GAR_REPOSITORY}, REGISTRY=${GAR_LOCATION}-docker.pkg.dev"
+
+      - name: Print non-secret configuration
+        run: |
+          echo "PROJECT_ID=${PROJECT_ID}"
+          echo "REGION=${REGION}"
+          echo "GAR_LOCATION=${GAR_LOCATION}"
+          echo "GAR_REPOSITORY=${GAR_REPOSITORY}"
+          echo "REGISTRY=${REGISTRY}"
 
       - name: Google auth
         uses: google-github-actions/auth@v2
